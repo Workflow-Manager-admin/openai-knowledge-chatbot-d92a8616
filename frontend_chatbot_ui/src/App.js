@@ -1,6 +1,53 @@
 import React, { useState, useEffect, useRef } from "react";
 import "./App.css";
 
+// Utility to dynamically load all markdowns from public/assets (CRA builds will copy public/assets to /assets at runtime)
+async function loadAssetsMarkdown() {
+  // We'll attempt to fetch /assets/manifest.json, which we'll generate by default, or fallback to scanning for .md files by index fetch.
+  // Since we can't list files in /assets from frontend, we'll use a file index manifest approach.
+  // If manifest.json is not present, fallback to common markdown names.
+  const assetRoot = "/assets";
+  let mdFileNames = [];
+  let combinedContent = "";
+
+  // Try manifest.json first (advanced usage)
+  try {
+    const res = await fetch(`${assetRoot}/manifest.json`);
+    if (res.ok) {
+      const manifest = await res.json();
+      // Only include .md files
+      mdFileNames = manifest.filter(name => name.endsWith(".md"));
+    }
+  } catch (e) {
+    // Manifest might not exist - fallback below
+  }
+
+  // If no manifest or empty, guess common markdowns in /assets
+  if (mdFileNames.length === 0) {
+    // Fallback: try 'knowledge.md', 'default.md', 'kb.md'
+    mdFileNames = ["knowledge.md", "default.md", "kb.md"];
+  }
+
+  // Try to fetch all mdFiles. If not found, skip.
+  for (let fname of mdFileNames) {
+    try {
+      const resp = await fetch(`${assetRoot}/${fname}`);
+      if (resp.ok) {
+        const text = await resp.text();
+        if (text.trim().length > 0) {
+          combinedContent += `\n[${fname}]\n${text}\n`;
+        }
+      }
+    } catch (e) {
+      // Ignore missing file
+    }
+  }
+  if (combinedContent.trim().length === 0) {
+    return null;
+  }
+  return combinedContent.trim();
+}
+
 // Accent/Primary/Secondary colors from requirements
 const ACCENT = "#f59e42";
 const PRIMARY = "#2563eb";
@@ -26,13 +73,23 @@ function App() {
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [markdownKb, setMarkdownKb] = useState(null);
+  // markdownKb (old) is removed and replaced by assetKb and userMarkdownKb
+  const [assetKb, setAssetKb] = useState(null);
+  const [userMarkdownKb, setUserMarkdownKb] = useState(null);
   const [chatConfig, setChatConfig] = useState({
     temperature: 0.7,
     max_tokens: 800,
     system_prompt: "",
   });
   const fileInputRef = useRef();
+
+  // On mount: load all markdowns from assets
+  useEffect(() => {
+    (async () => {
+      const kb = await loadAssetsMarkdown();
+      setAssetKb(kb); // can be null if nothing found
+    })();
+  }, []);
 
   // Persist theme to localStorage and apply to document
   useEffect(() => {
@@ -78,10 +135,14 @@ function App() {
   // Simulate sending to backend & OpenAI API; in production, make API call via a backend
   async function handleBotReply(newMessages) {
     setIsLoading(true);
-    // Compose history for OpenAI, using KB/system prompt if available
+    // Compose knowledge from assets + user .md uploads
+    let fullKnowledge = "";
+    if (assetKb && assetKb.length > 0) fullKnowledge += assetKb + "\n";
+    if (userMarkdownKb && userMarkdownKb.length > 0) fullKnowledge += "\n[User Upload]\n" + userMarkdownKb;
+    // Compose system prompt, knowledge, and chat history
     const openaiApiKey = process.env.REACT_APP_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
     let prompt = chatConfig.system_prompt;
-    if (markdownKb) prompt += "\nKnowledge Base:\n" + markdownKb;
+    if (fullKnowledge && fullKnowledge.trim().length > 0) prompt += "\nKnowledge Base:\n" + fullKnowledge;
     // Format conversation as history
     const userMsgs = newMessages
       .filter((msg) => msg.role !== "assistant")
@@ -118,7 +179,7 @@ function App() {
       } else {
         // Mock fallback if no API key is present
         reply =
-          "👋 This would call the OpenAI API to answer using your uploaded markdown file as a knowledge base. (No API key set: please configure it in Settings or via REACT_APP_OPENAI_API_KEY)";
+          "👋 This would call the OpenAI API to answer using any markdown knowledge from /assets (and any user-uploaded markdown file). (No API key set: please configure it in Settings or via REACT_APP_OPENAI_API_KEY)";
       }
     } catch (e) {
       reply = "⚠️ Error talking to OpenAI API: " + e.message;
@@ -145,12 +206,12 @@ function App() {
     const reader = new FileReader();
     reader.onload = (ev) => {
       const text = ev.target.result;
-      setMarkdownKb(text);
+      setUserMarkdownKb(text);
       setMessages((msgs) => [
         ...msgs,
         {
           role: "assistant",
-          content: `📂 Uploaded markdown knowledge base: **${file.name}**`,
+          content: `📂 Uploaded markdown knowledge base: **${file.name}**\n(This will be combined with any markdowns found in /assets)`,
           timestamp: new Date().toLocaleTimeString(),
         },
       ]);
@@ -290,7 +351,18 @@ function App() {
               onChange={handleFileUpload}
               ref={fileInputRef}
             />
-            <small>{markdownKb ? <span>✅ Knowledge loaded</span> : "Upload a local markdown file."}</small>
+            <small>
+              {(assetKb || userMarkdownKb) ? (
+                <span>
+                  ✅ Knowledge loaded from
+                  {assetKb && <span> <b>/assets</b></span>}
+                  {assetKb && userMarkdownKb && <span> &amp; </span>}
+                  {userMarkdownKb && <span> <b>uploaded file</b></span>}!
+                </span>
+              ) : (
+                <span>Upload a local markdown file, or place knowledge markdown(s) in /public/assets.</span>
+              )}
+            </small>
           </div>
           <div className="setting-group" style={{ marginTop: 32 }}>
             <button className="clear-chat-btn" onClick={clearChat}>Clear Chat</button>
